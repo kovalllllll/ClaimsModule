@@ -1,0 +1,136 @@
+---
+description: Angular 18 frontend screens, components, reactive forms, service layer, role-based UI gating for Claims Module
+globs: claims-module-ui/**
+alwaysApply: false
+---
+
+# Claims Module — Angular Frontend
+
+## General Rules (ALL mandatory)
+- Angular 18+ with lazy-loaded feature modules
+- Angular Material + custom primary color palette (not default indigo)
+- Reactive Forms ONLY — no template-driven forms
+- ALL API calls via typed Angular service layer — NO direct HttpClient in components
+- HTTP interceptor adds `Authorization: Bearer {token}` to ALL outgoing requests
+- All API errors caught at service layer → displayed via `MatSnackBar` (success=green, error=red, warning=amber)
+- All async operations show `mat-spinner` or skeleton loader; buttons disabled during pending calls
+- Form validation via `mat-error` inside `mat-form-field`
+- Responsive layout: usable at **1280px+** minimum width (FRS §11.4)
+
+## Feature Modules (lazy-loaded)
+- `ClaimsListModule` → `/claims`
+- `ClaimDetailModule` → `/claims/:id`
+- `FnolIntakeModule` → `/claims/new`
+
+## Mock Auth Service (hardcoded — no real auth needed)
+- 3 fixed users: `handler`, `supervisor`, `manager`
+- Header shows **logged-in user name and role** (FRS §11.4) plus role switcher for testing
+- JWT via `POST /api/auth/token`; HTTP interceptor reads token from AuthService
+
+## Screen 1: Claims List Dashboard (`/claims`)
+### Required Columns
+- Claim Number | Policy Number | Client Name | Loss Date | Cause of Loss | Status badge | Total Reserve Amount
+
+### Status Badge Colours (mandatory)
+| Status | Colour |
+|---|---|
+| Draft | grey |
+| Open | blue |
+| UnderInvestigation | orange |
+| PendingPayment | purple |
+| Closed | green |
+| Reopened | amber |
+| Withdrawn | dark grey |
+
+### Filter Bar
+- Status: multi-select dropdown
+- Date range: Loss Date from/to (date pickers)
+- Assigned Handler: text search
+- Cause of Loss: dropdown from `GET /api/reference/cause-of-loss-codes`
+
+### Other
+- Each row clickable → `/claims/:id`
+- "Log New Claim" primary button → `/claims/new`
+- Show total count + page size selector
+- Empty state message when no results
+
+## Screen 2: FNOL Intake Form (`/claims/new`)
+Multi-step stepper. Each step validates INDEPENDENTLY before advancing.
+
+### Step 1 — Policy & Loss Details
+- Policy search: typeahead; calls `GET /api/policies/search?q=...`; dropdown of results
+- On selection: populate PolicyNumber, ClientName, effective/expiration dates
+- In-force indicator: green = within period, amber = outside or expired
+- "Unknown Policy" toggle: proceeds with `PolicyId = null` (Warning shown)
+- Loss Date: date-time picker + instant validation for BR-C-01 (not in future)
+- Cause of Loss: searchable dropdown from reference API
+- Loss Description: textarea with character counter (min 20 chars — BR-C-07)
+- Loss Location: free text
+- Estimated Loss Amount: optional numeric
+
+### Step 2 — Parties & Risk Objects
+- "Add Party" → inline form: Role (Claimant/Insured/ThirdParty/Witness/Attorney), Type (Person/Company), name, email, phone
+- At least one Claimant required — inline warning if none
+- Added parties shown as styled chips; remove button per chip
+- "Add Risk Object" → inline form: Asset Type, Asset Description, Damage Description, Reference
+- Risk objects shown as styled chips
+- **Advisory** if no risk objects added (FRS §11.2): at least one recommended; does not block claim creation or Open transition (BR-C-08 Warning)
+
+### Step 3 — Initial Reserve & Review
+- Optional reserve: Component dropdown + Amount + real-time authority indicator:
+  - ≤ $10,000 → "✓ Auto-approved"
+  - > $10,000 ≤ $100,000 → "⚠ Supervisor approval required"
+  - > $100,000 → "⚠ Manager approval required"
+- Read-only review summary of all entered data
+- "Create Claim" button disabled until Steps 1 and 2 valid
+- Confirmation dialog if any Warning validation issues
+- On success: navigate to `/claims/:id` + success banner/snackbar displaying generated **Claim Number** and link to detail (FRS §11.3)
+
+## Screen 3: Claim Detail (`/claims/:id`)
+
+### Header (always visible)
+- Claim Number (prominent, copyable)
+- Status chip (colour-coded)
+- Policy Number + Client Name
+- Loss Date + Cause of Loss
+- Assigned Handler
+- Status Transition button: dropdown of valid next statuses → confirmation dialog
+  - For → Closed: pre-flight checklist showing CC-01–CC-04 status
+
+### Tab 1 — Overview
+Loss event fields (date, description, location, cause), severity badge, estimated amount, editable notes
+
+### Tab 2 — Parties
+Party list with role badge, contact info, active status. "Add Party" button. Remove button (disabled for last Claimant).
+
+### Tab 3 — Reserves
+- Summary cards: one per component (CurrentBalance + PendingAmount in amber if pending)
+- Transaction table: Date | Type | Component | Amount (green/red) | Status badge | Submitted By | Approved By | GL Status
+- GL Status badge: Pending | Posted | Failed (with retry)
+- "Add Reserve" → slide-in form with Component, Amount, Reason + real-time authority indicator
+- Per PendingApproval row:
+  - **Approve button**: ONLY visible to `supervisor` or `manager` role
+  - **Reject button**: ONLY visible to `supervisor` or `manager` role
+  - **Retract button**: visible to the submitter of their own transaction
+  - Handler role: NO Approve/Reject buttons shown
+
+### Tab 4 — Documents
+- List: name, type, date, uploader, size + download button (SAS URL → new tab)
+- Upload button → file picker → multipart POST → progress indicator
+
+### Tab 5 — Audit Log
+- Reverse-chronological paginated list
+- Per entry: timestamp | EventType badge | description | user | related entity
+- Read-only; no editing
+
+## Typed Angular Service Layer
+```typescript
+ClaimsService:     getAllClaims(filters), getClaimById(id), createClaim(command), transitionStatus(id, command)
+ReserveService:    getReserves(claimId), openReserve(claimId, cmd), approveReserve(claimId, txnId), rejectReserve(claimId, txnId, reason), retractReserve(claimId, txnId)
+PolicyService:     searchPolicies(query), getCoverageTypes(policyId)
+ReferenceService:  getCauseOfLossCodes(perilCategory?), getClaimStatuses()
+DocumentService:   uploadDocument(claimId, file), getDocuments(claimId)
+AuditService:      getAuditLog(claimId, page)
+AuthService:       getCurrentUser(), getToken(), switchRole(role) [mock only]
+PartyService:      addParty(claimId, cmd), removeParty(claimId, partyId)
+```

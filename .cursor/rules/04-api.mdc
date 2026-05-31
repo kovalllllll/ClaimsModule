@@ -1,0 +1,96 @@
+---
+description: All REST API endpoints, MediatR command/query names, FluentValidation rules, Hangfire job specifications for Claims Module backend
+globs: src/ClaimsModule.API/**,src/ClaimsModule.Application/**,src/ClaimsModule.Infrastructure/**
+alwaysApply: false
+---
+
+# Claims Module — API Endpoints, Validators & Hangfire Jobs
+
+## API General Rules
+- RESTful JSON; JWT Bearer auth (mock acceptable)
+- Idempotency via `Idempotency-Key` header on all write operations
+- **CorrelationId (BR-A-03):** `CorrelationIdMiddleware` reads `X-Correlation-Id` or generates a GUID; propagates via `ICorrelationIdAccessor` to all `IAuditLogService` writes in the same request
+- All validation errors → HTTP 422 with structured error body (see 01-architecture.mdc)
+- Swagger/OpenAPI must be accessible at deployed URL
+
+## Non-FRS dev endpoints (Assessment §4.3 test credentials)
+
+| Method | Route | Purpose |
+|---|---|---|
+| POST | /api/auth/token | Mock JWT for `handler` / `supervisor` / `manager` — not in FRS §10; required for local/demo auth |
+
+## Assessment API deviations (implement FRS, not Assessment)
+
+- **Adjust reserve:** use `POST /api/claims/{id}/reserves` with `transactionType: Adjust` — do **not** add Assessment `PUT /api/claims/{id}/reserves/{reserveId}`
+
+## Claims Endpoints
+| Method | Route | MediatR Handler | Notes |
+|---|---|---|---|
+| POST | /api/claims | `CreateClaimCommand` | Full validation; atomic ClaimNumber; creates Claim + LossEvent + Parties + RiskObjects + optional reserve in ONE transaction; triggers ClaimCreated event; returns 201 with ClaimNumber |
+| GET | /api/claims | `ListClaimsQuery` | Paginated. Filters: `status`, `dateFrom`, `dateTo`, `assignedHandlerId`, `causeOfLossCode`, `policyId`, `search`. `search` must match **claimNumber**, policyNumber, and clientName (FRS list). Returns: id, claimNumber, clientName, policyNumber, lossDate, status, totalReserves |
+| GET | /api/claims/{id} | `GetClaimDetailQuery` | Full detail: parties, risk objects, reserve summary, doc list, recent audit entries |
+| PUT | /api/claims/{id}/status | `TransitionClaimStatusCommand` | Body: `{ targetStatus, reason? }`. Validates state machine. HTTP 422 with blocking conditions if not permitted |
+| GET | /api/claims/{id}/audit | `GetClaimAuditQuery` | Paginated, reverse-chronological, append-only |
+| POST | /api/claims/{id}/parties | `AddClaimPartyCommand` | Logs `PARTY_ADDED` |
+| DELETE | /api/claims/{id}/parties/{partyId} | `RemoveClaimPartyCommand` | Soft-remove (IsActive=false). HTTP 422 if removing last Claimant |
+| POST | /api/claims/{id}/documents | `UploadClaimDocumentCommand` | Multipart form; store via IStorageService; max 50MB; allowed: PDF/JPEG/PNG/DOCX/XLSX/TXT/CSV; logs `DOCUMENT_UPLOADED` |
+| GET | /api/claims/{id}/documents | `GetClaimDocumentsQuery` | Returns SAS URL (1-hour TTL) per document |
+
+## Reserve Endpoints
+| Method | Route | MediatR Handler | Notes |
+|---|---|---|---|
+| POST | /api/claims/{id}/reserves | `OpenReserveCommand` or `AdjustReserveCommand` | Body: `{ component, amount, changeReason, transactionType? }`. `Add` (default) opens component; `Adjust` adjusts existing. Creates ReserveHistory. If auto-approved → enqueue GL job. Returns 201 |
+| GET | /api/claims/{id}/reserves | `GetClaimReservesQuery` | Summary (balance per component) + full transaction history |
+| POST | /api/claims/{id}/reserves/{txnId}/approve | `ApproveReserveCommand` | Requires Supervisor or Manager role. Validate not self-approving. On success: status → Approved, enqueue GL job. Logs `RESERVE_APPROVED` |
+| POST | /api/claims/{id}/reserves/{txnId}/reject | `RejectReserveCommand` | Requires Supervisor or Manager. Body: `{ rejectionReason }`. Status → Rejected. Logs `RESERVE_REJECTED` |
+| POST | /api/claims/{id}/reserves/{txnId}/retract | `RetractReserveCommand` | Submitter only. Status → Cancelled. Logs `RESERVE_RETRACTED` |
+
+## Policy Lookup (Simulated)
+| Method | Route | MediatR Handler | Notes |
+|---|---|---|---|
+| GET | /api/policies/search | `SearchPoliciesQuery` | `?q=` partial match on PolicyNumber or ClientName |
+| GET | /api/policies/{id}/coverage | `GetPolicyCoverageQuery` | Returns coverage types for a policy |
+
+## Reference Data
+| Method | Route | MediatR Handler | Notes |
+|---|---|---|---|
+| GET | /api/reference/cause-of-loss-codes | `GetCauseOfLossCodesQuery` | Filter: `?perilCategory=Weather` |
+| GET | /api/reference/claim-statuses | `GetClaimStatusesQuery` | Returns all statuses with valid next-status transitions |
+
+## FluentValidation Rules (ALL on MediatR Commands — NOT controllers)
+| Field | Rule | Severity | Error Message |
+|---|---|---|---|
+| LossDate | Not in future | Critical | "Loss date cannot be in the future." |
+| LossDate | Valid date required | Critical | "Loss date is required." |
+| LossDate | Within policy effective period (if policy linked) | Warning | "Loss date is outside the policy effective period." |
+| LossDescription | Required; min 20 chars | Critical | "Loss description is required and must be at least 20 characters." |
+| CauseOfLossCode | Must exist and be active | Critical | "Cause of loss code is not recognised or is inactive." |
+| PolicyId | Null = warning only | Warning | "No policy linked. Policy must be associated before reserves can be set." |
+| ClaimParties | At least one Claimant for Open | Critical | "At least one Claimant party is required to open a claim." |
+| ReserveAmount | > 0 (except SubrogationRecoverable) | Critical | "Reserve amount must be greater than zero." |
+| ReserveComponent | Valid component type | Critical | "Invalid reserve component type." |
+| ReserveAmount (aggregate) | Total ≤ $10M per claim | Warning | "Total reserves will exceed $10,000,000. Manager override required." |
+| StatusTransition | Valid per state machine | Critical | "Transition from {from} to {to} is not permitted." |
+| StatusTransition (Closed) | All CC conditions satisfied | Critical | "Claim cannot be closed — {condition} is not satisfied." |
+| ReserveApproval | Approver role Supervisor or Manager | Critical | "Your role does not have authority to approve this reserve amount." |
+| ReserveApproval | Not self-approving | Critical | "Self-approval is not permitted." |
+
+## Hangfire Job: PostGLReserveChangeJob
+- **Trigger**: `BackgroundJob.Enqueue<PostGLReserveChangeJob>(...)` immediately on reserve approval (auto or manual)
+- **Idempotency key**: `Reserve:{ReserveId}:Change:{ChangeSequence}`
+- **Re-entrancy**: Check `ReserveHistory.PostingStatus == Posted` BEFORE any write. If already Posted → no-op, return.
+- **On execute**: Write `ClaimAuditLog` entry with `EventType = GL_POSTING_SIMULATED`, description: `"DR Change in Outstanding Reserves / CR Outstanding Loss Reserves, Amount = {amount}"`. Set `ReserveHistory.PostingStatus = Posted`. Save `PostingJobId`.
+- **On failure**: After all Hangfire retries exhausted → set `PostingStatus = Failed`, write `GL_POSTING_FAILED` audit log.
+
+## Hangfire Job: SlaMonitoringJob
+- **Schedule**: Recurring, every 15 minutes — cron: `*/15 * * * *`
+- **On execute**: Find claims WHERE `Status IN ('Draft', 'Open')` AND `UpdatedAt < (UtcNow - 48 hours)`
+- **Per matching claim**: Write `ClaimAuditLog` entry with `EventType = SLA_BREACH_DETECTED`. Do NOT change claim status.
+- **Dedup**: Only add new entry if no `SLA_BREACH_DETECTED` entry in last 24 hours for that claim.
+
+## Document Storage Details
+- Container: `claim-documents`
+- Stored blob path (in DB): `claim-documents/{organisationId}/{claimId}/{guid}_{sanitisedFilename}` OR object key `{organisationId}/{claimId}/{sanitisedFilename}` within container — both acceptable; implementation uses prefix in stored path
+- SAS URL TTL: 1 hour
+- Fallback path (local): `/uploads/{organisationId}/{claimId}/`
+- Config key: `StorageProvider: AzureBlob | LocalFileSystem`

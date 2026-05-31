@@ -1,0 +1,19 @@
+<mat-toolbar color="primary" class="app-toolbar">
+  <a routerLink="/claims" class="brand">Claims Module</a>
+  <span class="spacer"></span>
+  @if (authReady()) {
+    <span class="user-label">{{ currentUserName }}</span>
+    <mat-form-field appearance="outline" class="role-field" subscriptSizing="dynamic">
+      <mat-label>Role</mat-label>
+      <mat-select [value]="selectedRole()" (valueChange)="onRoleChange($event)">
+        @for (role of roles; track role) {
+          <mat-option [value]="role">{{ role }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+  }
+</mat-toolbar>
+
+<main class="app-content">
+  <router-outlet />
+</main>

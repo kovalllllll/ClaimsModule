@@ -1,0 +1,244 @@
+---
+description: EF Core entity configurations, database schema conventions, all required entities with columns, seed data for policies and cause-of-loss codes
+globs: src/ClaimsModule.Persistence/**,src/ClaimsModule.Domain/**
+alwaysApply: false
+---
+
+# Claims Module — Database Schema & EF Core Configuration
+
+## Column Conventions (APPLY TO ALL TABLES — NO EXCEPTIONS)
+| Type | Convention |
+|---|---|
+| Primary Keys | `UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID()` — sequential GUIDs |
+| Monetary | `DECIMAL(19,4)` — NEVER use `money` or `float` |
+| Timestamps | `DATETIMEOFFSET(7)` stored in UTC |
+| Short codes | `NVARCHAR(50)` |
+| Names | `NVARCHAR(255)` |
+| Free text / JSON | `NVARCHAR(MAX)` |
+| Soft Delete | `IsDeleted BIT NOT NULL DEFAULT 0` + `DeletedAt DATETIMEOFFSET(7) NULL` — ALL master/transaction tables |
+| Audit Columns | `CreatedAt`, `UpdatedAt NULL`, `UserCreated NULL`, `UserModified NULL` — ALL tables |
+| Tenant Isolation | `OrganisationId UNIQUEIDENTIFIER NOT NULL` — EVERY business table |
+| Optimistic Concurrency | `RowVer ROWVERSION` — aggregate roots only: Claims, ClaimReserveComponents |
+
+## EF Core Rules (Reviewers specifically check these)
+- Use ONLY `IEntityTypeConfiguration<T>` Fluent API — NO data annotations for schema
+- Global query filter on every soft-deletable entity: `.HasQueryFilter(e => !e.IsDeleted)`
+- All decimal: `.HasPrecision(19, 4)`
+- ROWVERSION: `.IsRowVersion()`
+- GUID PKs: `.HasDefaultValueSql("NEWSEQUENTIALID()")`
+- All seed data via `HasData()` in migrations — NOT in application startup
+- `dotnet ef database update` must work on a fresh SQL Server instance
+
+## Entity: Claims (Aggregate Root)
+```
+ClaimId               UNIQUEIDENTIFIER PK NEWSEQUENTIALID()
+OrganisationId        UNIQUEIDENTIFIER NOT NULL
+ClaimNumber           NVARCHAR(50) NOT NULL UNIQUE
+PolicyId              UNIQUEIDENTIFIER NULL
+PolicyNumber          NVARCHAR(50) NULL (denormalised)
+ClientName            NVARCHAR(255) NULL (denormalised)
+Status                NVARCHAR(50) NOT NULL
+Severity              NVARCHAR(50) NULL (Catastrophic/Critical/Standard/Minor)
+ReportedDate          DATETIMEOFFSET(7) NOT NULL
+AssignedHandlerId     UNIQUEIDENTIFIER NULL
+ClosedAt              DATETIMEOFFSET(7) NULL
+ClosureReason         NVARCHAR(MAX) NULL
+Notes                 NVARCHAR(MAX) NULL
+ManagerOverrideFlag   BIT NOT NULL DEFAULT 0
+IsDeleted BIT + DeletedAt, CreatedAt, UpdatedAt, UserCreated, UserModified, RowVer
+```
+
+## Entity: LossEvents
+```
+LossEventId           UNIQUEIDENTIFIER PK
+ClaimId               UNIQUEIDENTIFIER NOT NULL FK→Claims
+LossDate              DATETIMEOFFSET(7) NOT NULL
+LossDescription       NVARCHAR(MAX) NOT NULL (min 20 chars)
+LossLocation          NVARCHAR(500) NULL
+CauseOfLossCode       NVARCHAR(50) NOT NULL FK→CauseOfLossCodes.Code
+EstimatedLossAmount   DECIMAL(19,4) NULL
+ReportDate            DATETIMEOFFSET(7) NOT NULL
+PoliceReportNumber    NVARCHAR(100) NULL
++ OrganisationId, audit columns, soft delete
+```
+
+## Entity: ClaimParties
+```
+ClaimPartyId    UNIQUEIDENTIFIER PK
+ClaimId         UNIQUEIDENTIFIER NOT NULL FK→Claims
+PartyRole       NVARCHAR(50) NOT NULL  (Claimant/Insured/ThirdParty/Witness/Attorney)
+PartyType       NVARCHAR(20) NOT NULL  (Person/Company)
+FirstName       NVARCHAR(100) NULL
+LastName        NVARCHAR(100) NULL
+CompanyName     NVARCHAR(255) NULL
+Email           NVARCHAR(255) NULL
+Phone           NVARCHAR(50) NULL
+Notes           NVARCHAR(MAX) NULL
+IsActive        BIT NOT NULL DEFAULT 1  (soft-remove = set false)
++ OrganisationId, audit columns, IsDeleted/DeletedAt
+```
+
+## Entity: ClaimRiskObjects
+```
+ClaimRiskObjectId   UNIQUEIDENTIFIER PK
+ClaimId             UNIQUEIDENTIFIER NOT NULL FK→Claims
+AssetType           NVARCHAR(50) NOT NULL  (Vehicle/Property/Person/Equipment/Other)
+AssetDescription    NVARCHAR(500) NOT NULL
+DamageDescription   NVARCHAR(MAX) NULL
+IsPrimary           BIT NOT NULL DEFAULT 0
+AssetReference      NVARCHAR(255) NULL
++ OrganisationId, audit columns, soft delete
+```
+
+## Entity: ClaimReserveComponents (Aggregate Root — has RowVer)
+```
+ReserveComponentId  UNIQUEIDENTIFIER PK
+ClaimId             UNIQUEIDENTIFIER NOT NULL FK→Claims
+Component           NVARCHAR(50) NOT NULL  (Indemnity/Expense/ALAE/SubrogationRecoverable)
+CurrentAmount       DECIMAL(19,4) NOT NULL DEFAULT 0  (computed from approved history)
+Status              NVARCHAR(50) NOT NULL  (Active/Closed)
+Notes               NVARCHAR(MAX) NULL
++ OrganisationId, audit columns, soft delete, RowVer
+```
+
+## Entity: ReserveHistory (APPEND-ONLY — event sourced)
+```
+ReserveHistoryId      UNIQUEIDENTIFIER PK
+ReserveComponentId    UNIQUEIDENTIFIER NOT NULL FK→ClaimReserveComponents
+ClaimId               UNIQUEIDENTIFIER NOT NULL FK→Claims (denormalised)
+TransactionType       NVARCHAR(50) NOT NULL  (Add/Adjust/Reverse)
+Amount                DECIMAL(19,4) NOT NULL  (delta; SubrogationRecoverable may be negative)
+PreviousBalance       DECIMAL(19,4) NOT NULL
+NewBalance            DECIMAL(19,4) NOT NULL
+ApprovalStatus        NVARCHAR(50) NOT NULL  (AutoApproved/PendingApproval/Approved/Rejected/Cancelled)
+ApprovedByUserId      UNIQUEIDENTIFIER NULL
+ApprovedAt            DATETIMEOFFSET(7) NULL
+RejectedByUserId      UNIQUEIDENTIFIER NULL
+RejectedAt            DATETIMEOFFSET(7) NULL
+RejectionReason       NVARCHAR(MAX) NULL
+ChangeReason          NVARCHAR(500) NOT NULL
+PostingStatus         NVARCHAR(50) NOT NULL  (Pending/Posted/Failed/Cancelled)
+PostingJobId          NVARCHAR(200) NULL  (Hangfire job ID)
+IdempotencyKey        NVARCHAR(200) NOT NULL  (Reserve:{ReserveId}:Change:{Seq})
+ChangeSequence        INT NOT NULL  (monotonically increasing per component)
+SubmittedByUserId     UNIQUEIDENTIFIER NULL
+CreatedAt             DATETIMEOFFSET(7) NOT NULL
+OrganisationId        UNIQUEIDENTIFIER NOT NULL
+```
+NOTE: No IsDeleted, no UpdatedAt on this table — append-only
+
+## Entity: ClaimDocuments
+```
+ClaimDocumentId     UNIQUEIDENTIFIER PK
+ClaimId             UNIQUEIDENTIFIER NOT NULL FK→Claims
+DocumentType        NVARCHAR(100) NOT NULL  (PoliceReport/MedicalReport/Invoice/Other)
+DocumentName        NVARCHAR(255) NOT NULL
+BlobPath            NVARCHAR(500) NOT NULL
+ContentType         NVARCHAR(100) NOT NULL
+FileSizeBytes       BIGINT NOT NULL
+UploadedAt          DATETIMEOFFSET(7) NOT NULL
+UploadedByUserId    UNIQUEIDENTIFIER NULL
+Notes               NVARCHAR(500) NULL
++ OrganisationId, audit columns
+```
+
+## Entity: ClaimAuditLog (IMMUTABLE — NO UPDATE, NO DELETE EVER)
+```
+AuditLogId          UNIQUEIDENTIFIER PK
+ClaimId             UNIQUEIDENTIFIER NOT NULL FK→Claims
+EventType           NVARCHAR(100) NOT NULL
+Description         NVARCHAR(MAX) NOT NULL
+OldValue            NVARCHAR(MAX) NULL  (JSON)
+NewValue            NVARCHAR(MAX) NULL  (JSON)
+RelatedEntityId     UNIQUEIDENTIFIER NULL
+RelatedEntityType   NVARCHAR(255) NULL
+CorrelationId       UNIQUEIDENTIFIER NULL
+CreatedAt           DATETIMEOFFSET(7) NOT NULL
+CreatedByUserId     UNIQUEIDENTIFIER NULL
+OrganisationId      UNIQUEIDENTIFIER NOT NULL
+```
+No IsDeleted, no UpdatedAt, no RowVer. EF must block any Update/Delete at application layer.
+
+## Entity: CauseOfLossCodes (Reference/Lookup)
+```
+CauseOfLossCodeId   UNIQUEIDENTIFIER PK
+Code                NVARCHAR(50) NOT NULL UNIQUE
+Name                NVARCHAR(255) NOT NULL
+PerilCategory       NVARCHAR(50) NOT NULL  (Property/Auto/Liability/Weather/Equipment/Crime/General)
+IsActive            BIT NOT NULL DEFAULT 1
+SortOrder           INT NOT NULL DEFAULT 0
+OrganisationId      UNIQUEIDENTIFIER NOT NULL
+```
+
+## Entity: Policies (Simulated)
+```
+PolicyId        UNIQUEIDENTIFIER PK
+PolicyNumber    NVARCHAR(50) NOT NULL UNIQUE
+ClientName      NVARCHAR(255) NOT NULL
+EffectiveDate   DATE NOT NULL
+ExpirationDate  DATE NOT NULL
+Status          NVARCHAR(50) NOT NULL  (Active/Expired/Cancelled)
+CoverageTypes   NVARCHAR(MAX) NOT NULL  (JSON array)
+OrganisationId  UNIQUEIDENTIFIER NOT NULL
+```
+
+## Entity: ClaimSequence (for atomic claim number generation)
+```
+SequenceId      UNIQUEIDENTIFIER PK
+Year            INT NOT NULL
+NextValue       INT NOT NULL DEFAULT 1
+OrganisationId  UNIQUEIDENTIFIER NOT NULL
+UNIQUE(Year, OrganisationId)
+```
+
+## Naming conventions (FRS §15.3)
+
+| Layer | Convention |
+|---|---|
+| Database tables | PascalCase singular noun (`Claims`, `LossEvents`, `ClaimParties`) |
+| Database columns | PascalCase (`ClaimId`, `LossDate`, `CauseOfLossCode`) |
+| C# entities | PascalCase; match table name |
+| C# DTOs / commands | Suffix `Dto` or `Request`/`Response`; MediatR: `VerbNounCommand`, `GetNounQuery`, `ListNounsQuery` |
+| API routes | kebab-case plural nouns (`/api/claims`, `/api/reference/cause-of-loss-codes`) |
+
+## Assessment schema name deviations (use FRS names)
+
+- Tenant column: **`OrganisationId`** — not Assessment `OrganizationEntityId`
+- Reserve history balances: **`PreviousBalance`**, **`NewBalance`** — not Assessment `PreviousAmount` / `NewAmount`
+- No **`ClaimStatusTransitions`** table — transitions enforced in application layer per FRS state machine
+
+## Fixed Seed OrganisationId
+`'00000000-0000-0000-0000-000000000001'`
+
+## Seed Policies (HasData — 5 required)
+| PolicyNumber | ClientName | EffectiveDate | ExpirationDate | Status | CoverageTypes |
+|---|---|---|---|---|---|
+| POL-2024-001001 | Meridian Transport LLC | 2024-01-01 | 2026-12-31 | Active | ["Vehicle","Cargo"] |
+| POL-2024-001002 | Harborview Properties Inc | 2024-06-01 | 2026-05-31 | Active | ["Property","Liability"] |
+| POL-2025-002001 | Coastal Builders Group | 2025-03-01 | 2027-02-28 | Active | ["Property","Equipment"] |
+| POL-2025-002002 | Stanton Medical Group | 2025-01-01 | 2026-12-31 | Active | ["Liability","Vehicle"] |
+| POL-2023-000099 | Archived Corp | 2020-01-01 | 2021-12-31 | Expired | ["Property"] |
+Note: POL-2023-000099 is EXPIRED — for testing BR-C-02 Warning
+
+## Seed CauseOfLossCodes (10 required)
+| Code | Name | PerilCategory |
+|---|---|---|
+| COL-FIRE | Fire | Property |
+| COL-FLOOD | Flood | Weather |
+| COL-THEFT | Theft | Crime |
+| COL-VEH-COL | Vehicle Collision | Auto |
+| COL-VEH-COMP | Vehicle Comprehensive | Auto |
+| COL-LIAB | Third Party Liability | Liability |
+| COL-EQUIP | Equipment Breakdown | Equipment |
+| COL-WIND | Wind / Storm | Weather |
+| COL-INJURY | Bodily Injury | Liability |
+| COL-OTHER | Other / Unknown | General |
+
+## Seed Mock Users (for JWT simulation — NOT stored in database)
+These fixed identities are used by the mock JWT auth service (`POST /api/auth/token`). No Users table seed is required.
+
+| UserId | Name | Role (JWT claim, lowercase) |
+|---|---|---|
+| `11111111-0000-0000-0000-000000000001` | John Handler | handler |
+| `22222222-0000-0000-0000-000000000002` | Sarah Supervisor | supervisor |
+| `33333333-0000-0000-0000-000000000003` | Mike Manager | manager |

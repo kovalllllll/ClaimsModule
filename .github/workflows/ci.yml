@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '9.0.x'
+  NODE_VERSION: '20'
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ClaimsModule.sln
+
+      - name: Build
+        run: dotnet build ClaimsModule.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test ClaimsModule.sln --configuration Release --no-build --verbosity normal
+
+      - name: Publish API
+        run: dotnet publish src/ClaimsModule.API/ClaimsModule.API.csproj -c Release -o ./publish/api --no-build
+
+      - name: Upload API artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-publish
+          path: ./publish/api
+
+      - name: Verify EF migrations
+        run: |
+          dotnet ef migrations list \
+            --project src/ClaimsModule.Persistence/ClaimsModule.Persistence.csproj \
+            --startup-project src/ClaimsModule.API/ClaimsModule.API.csproj \
+            --configuration Release
+
+  database:
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "YourStrong!Passw0rd"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P YourStrong!Passw0rd -C -Q \"SELECT 1\" || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Apply migrations on fresh SQL Server
+        run: |
+          dotnet ef database update \
+            --project src/ClaimsModule.Persistence/ClaimsModule.Persistence.csproj \
+            --startup-project src/ClaimsModule.API/ClaimsModule.API.csproj \
+            --connection "Server=localhost,1433;Database=ClaimsModuleCi;User Id=sa;Password=YourStrong!Passw0rd;TrustServerCertificate=True;MultipleActiveResultSets=true"
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: claims-module-ui/package-lock.json
+
+      - name: Install & build
+        working-directory: claims-module-ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload UI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: claims-module-ui/dist/claims-module-ui/browser
+
+  deploy:
+    needs: [backend, database, frontend]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download API artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: api-publish
+          path: ./publish/api
+
+      - name: Download UI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ./publish/ui
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Apply EF migrations (Azure SQL)
+        if: ${{ secrets.AZURE_SQL_CONNECTION_STRING != '' }}
+        run: |
+          dotnet ef database update \
+            --project src/ClaimsModule.Persistence/ClaimsModule.Persistence.csproj \
+            --startup-project src/ClaimsModule.API/ClaimsModule.API.csproj \
+            --connection "${{ secrets.AZURE_SQL_CONNECTION_STRING }}"
+
+      - name: Deploy API to Azure App Service
+        if: ${{ secrets.AZURE_API_PUBLISH_PROFILE != '' }}
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_API_APP_NAME }}
+          publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
+          package: ./publish/api
+
+      - name: Deploy UI to Azure Static Web Apps
+        if: ${{ secrets.AZURE_SWA_TOKEN != '' }}
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_TOKEN }}
+          action: upload
+          app_location: ./publish/ui
+          skip_app_build: true
+
+      - name: Post-deploy smoke (Swagger)
+        if: ${{ secrets.AZURE_API_URL != '' }}
+        run: curl -sf "${{ secrets.AZURE_API_URL }}/swagger/index.html" -o /dev/null

@@ -1,0 +1,149 @@
+---
+description: Domain model, claim lifecycle state machine, all business rules (BR-C, BR-R, BR-ST, BR-D, BR-P, BR-A), reserve event-sourcing pattern
+globs: src/ClaimsModule.Domain/**,src/ClaimsModule.Application/**
+alwaysApply: false
+---
+
+# Claims Module — Domain Model & Business Rules
+
+## Assessment vs FRS (do not implement Assessment errors)
+
+| Assessment item | FRS / this project |
+|---|---|
+| `OrganizationEntityId` tenant column | `OrganisationId` (FRS) |
+| `ClaimStatusTransitions` lookup table | Explicit state machine in code (FRS §5) |
+| SLA job sets `SlaBreached` claim status | Audit `SLA_BREACH_DETECTED` only; status unchanged (FRS §12.2) |
+| Reserve names: IndemnityReserve, LitigationReserve, etc. | Indemnity, Expense, ALAE, SubrogationRecoverable (FRS §7) |
+| Assessment BR-C-06 (Draft→Closed path rules) | **BR-C-06 in rules = FRS:** PolicyId null → Warning; reserves blocked until policy linked |
+| `PUT /api/claims/{id}/reserves/{reserveId}` for adjust | `POST /api/claims/{id}/reserves` with `transactionType: Adjust` (FRS §10.2) |
+| `ReserveHistory.PreviousAmount` / `NewAmount` | `PreviousBalance` / `NewBalance` (FRS schema) |
+
+## User Roles & Permissions
+| Role | Code | Authority |
+|---|---|---|
+| Claims Handler | `handler` | Create claims, manage parties, upload docs, open reserves ≤ $10,000 |
+| Claims Supervisor | `supervisor` | All handler + approve/reject reserves ≤ $100,000, manage transitions, reopen claims |
+| Claims Manager | `manager` | All supervisor + approve/reject reserves ≤ $10,000,000, set aggregate override flag |
+
+Role enforcement in TWO places: (1) backend reserve approval endpoints, (2) Angular Approve/Reject buttons hidden from handler role.
+
+## Claim Status Values
+| Status | Entry Condition |
+|---|---|
+| Draft | Automatic on creation |
+| Open | No Critical validation issues; at least one Claimant party exists |
+| UnderInvestigation | Handler manually transitions from Open |
+| PendingPayment | At least one reserve component with status Approved |
+| Closed | All closure conditions CC-01–CC-04 satisfied |
+| Reopened | Supervisor role + reopen reason provided |
+| Withdrawn | Withdrawal reason recorded |
+
+## Valid Status Transitions — ANY OTHER = HTTP 422
+| From | To | Conditions |
+|---|---|---|
+| Draft | Open | No Critical issues; at least one Claimant |
+| Open | UnderInvestigation | Handler or supervisor |
+| Open | PendingPayment | At least one Approved reserve |
+| Open | Closed | All CC-01–CC-04 satisfied |
+| Open | Withdrawn | Withdrawal reason provided |
+| UnderInvestigation | Open | Manual revert |
+| UnderInvestigation | PendingPayment | At least one approved reserve |
+| UnderInvestigation | Closed | All CC-01–CC-04 satisfied |
+| UnderInvestigation | Withdrawn | Withdrawal reason provided |
+| PendingPayment | Closed | All CC-01–CC-04 satisfied |
+| Closed | Reopened | Supervisor role + non-empty reopen reason |
+| Reopened | Open | Immediately on reopen |
+
+## Closure Conditions (ALL required — return 422 with list if any fail)
+- CC-01: No reserve components with status `PendingApproval`
+- CC-02: No unresolved Critical validation issues on the claim
+- CC-03: At least one ClaimParty of role Claimant
+- CC-04: If any component has CurrentAmount > 0 → non-critical Warning; handler must explicitly confirm with justification note
+
+## Business Rules — FNOL / Claim Creation
+| Rule | Severity | Description |
+|---|---|---|
+| BR-C-01 | Critical | LossDate must NOT be in the future |
+| BR-C-02 | Warning | LossDate must fall within linked policy's effective and expiration dates. Claim created but warning recorded in audit; must be acknowledged before Open transition |
+| BR-C-03 | Critical (blocks Open) | At least one ClaimParty with role Claimant required before Draft→Open |
+| BR-C-04 | System | ClaimNumber unique per organisation, atomic. Format: `CLM-{YYYY}-{7-digit-zero-padded}`. Soft-deleted claims still consume sequence number |
+| BR-C-05 | Critical | CauseOfLossCode must exist AND be active in reference table |
+| BR-C-06 | Warning | PolicyId = null → Warning: "No policy linked — claim requires policy association before financial actions are permitted." Reserve creation BLOCKED until policy linked |
+| BR-C-07 | Critical | LossDescription required; minimum 20 characters |
+| BR-C-08 | Warning | No risk objects linked — claim may proceed to Open; record warning via `VALIDATION_ISSUE_ADDED` (FRS §5.4 validation table) |
+
+## Business Rules — Reserve Management
+| Rule | Description |
+|---|---|
+| BR-R-01 | Amount > 0 (EXCEPT SubrogationRecoverable which may be negative) |
+| BR-R-02 | Authority thresholds: ≤ $10,000 = AutoApproved, GL job enqueued immediately; > $10,000 ≤ $100,000 = Supervisor or Manager; > $100,000 = Manager only |
+| BR-R-03 | Self-approval FORBIDDEN. Compare `submitterUserId` vs `approverId`. HTTP 422: "Self-approval is not permitted." |
+| BR-R-04 | Rejected reserve: submitter may create NEW transaction. Original rejected record RETAINED in history with status Rejected |
+| BR-R-05 | Total approved reserves across ALL components per claim ≤ $10,000,000. If exceeded → Warning + Manager must set `ManagerOverrideFlag = true` before approval |
+| BR-R-06 | Idempotency key: `Reserve:{ReserveId}:Change:{ChangeSequence}`. Re-entrant safe — running twice produces no duplicates |
+| BR-R-07 | PendingApproval reserve may NOT be modified. Submitter must retract (→ Cancelled) first, then submit new |
+
+## Business Rules — Status Transitions
+| Rule | Description |
+|---|---|
+| BR-ST-01 | Invalid transition → HTTP 422 listing valid next statuses |
+| BR-ST-02 | → Open: (a) no Critical issues, (b) at least one Claimant |
+| BR-ST-03 | → Closed: all CC-01–CC-04 satisfied. HTTP 422 with list of blocking conditions |
+| BR-ST-04 | → Reopened: Supervisor role + non-empty reason. Claim immediately → Open after Reopened |
+
+## Business Rules — Documents
+| Rule | Description |
+|---|---|
+| BR-D-01 | Blob path: `claim-documents/{organisationId}/{claimId}/{sanitisedFilename}`. Remove path traversal chars |
+| BR-D-02 | Retrieval via SAS URL, 1-hour TTL. Document bytes NOT proxied through API |
+| BR-D-03 | Azure Blob unavailable → fallback to local filesystem via IStorageService |
+| BR-D-04 | Max file size: 50 MB |
+| BR-D-05 | Allowed MIME: PDF, JPEG, PNG, DOCX, XLSX, TXT, CSV |
+
+## Business Rules — Parties
+| Rule | Description |
+|---|---|
+| BR-P-01 | At least one Claimant required before Open (Critical) |
+| BR-P-02 | Roles: Claimant, Insured, ThirdParty, Witness, Attorney. Multiple per role allowed |
+| BR-P-03 | Cannot soft-remove last Claimant → HTTP 422 |
+
+## Business Rules — Audit
+| Rule | Description |
+|---|---|
+| BR-A-01 | ClaimAuditLog APPEND-ONLY. No UPDATE or DELETE. Enforced at application layer |
+| BR-A-02 | All writes via `IAuditLogService` — no direct DbContext writes from handlers |
+| BR-A-03 | CorrelationId from HTTP request propagated to all audit entries |
+
+## Reserve Event-Sourcing Pattern (CRITICAL — Reviewers check this)
+- **Financial deltas are append-only:** Add / Adjust / Reverse always **INSERT** a new `ReserveHistory` row; never mutate `Amount`, `PreviousBalance`, or `NewBalance` on an existing row
+- **Workflow state may update in place:** `ApprovalStatus`, approver/rejector IDs, timestamps, `PostingStatus`, and `PostingJobId` on a pending transaction are updated when approving, rejecting, retracting, or GL-posting (per API §10.2)
+- `ClaimAuditLog` remains strictly append-only (no UPDATE/DELETE)
+- `CurrentAmount` on `ClaimReserveComponents` = SUM of all AutoApproved/Approved history transactions
+- PendingApproval transactions do NOT count toward CurrentAmount until approved
+
+## Reserve Component Types
+| Component | Can Go Negative? |
+|---|---|
+| Indemnity | No |
+| Expense | No |
+| ALAE | No |
+| SubrogationRecoverable | Yes (by design) |
+
+## Claim Number Generation (ATOMIC)
+- Use SQL SEQUENCE or dedicated sequence table with `UPDATE … OUTPUT INSERTED`
+- Format: `CLM-{YYYY}-{7-digit-zero-padded}` e.g. `CLM-2026-0000142`
+- No gaps; no reuse even after soft-delete
+
+## Hangfire GL posting — failure timing (FRS §12.1)
+
+`PostGLReserveChangeJob`: set `ReserveHistory.PostingStatus = Failed` and write `GL_POSTING_FAILED` audit **only after all Hangfire retries are exhausted**, not on the first exception.
+
+## Required Domain Events
+- `ClaimCreatedEvent` → triggers `CLAIM_CREATED` audit entry
+- `ClaimStatusChangedEvent` → triggers `STATUS_CHANGED` audit entry
+- `ReserveApprovedEvent` → triggers GL posting job enqueue
+- `ReserveRejectedEvent` → triggers `RESERVE_REJECTED` audit entry
+- `DocumentUploadedEvent` → triggers `DOCUMENT_UPLOADED` audit entry
+
+## All Audit EventTypes (IAuditLogService must write ALL of these)
+`CLAIM_CREATED`, `STATUS_CHANGED`, `PARTY_ADDED`, `PARTY_REMOVED`, `RESERVE_CREATED`, `RESERVE_AUTO_APPROVED`, `RESERVE_APPROVED`, `RESERVE_REJECTED`, `RESERVE_RETRACTED`, `GL_POSTING_SIMULATED`, `GL_POSTING_FAILED`, `DOCUMENT_UPLOADED`, `CLAIM_CLOSED`, `CLAIM_REOPENED`, `SLA_BREACH_DETECTED`, `VALIDATION_ISSUE_ADDED`

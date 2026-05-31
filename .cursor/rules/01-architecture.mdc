@@ -1,0 +1,86 @@
+---
+description: Clean Architecture, tech stack, CQRS rules, project structure for Claims Module
+globs: 
+alwaysApply: true
+---
+
+# Claims Module — Architecture & Tech Stack
+DICEUS Fullstack Assessment v1.0 | .NET 9 + Angular 18 | Greenfield standalone
+
+## Spec hierarchy (source of truth)
+
+1. `Claims_Module_Candidate_Specification.md` (FRS) — business rules, API §10, UI §11, database §6–8
+2. `DICEUS_Fullstack_Technical_Assessment.md` — deliverables, evaluation, general stack
+3. `.cursor/rules/01-architecture.mdc` through `05-frontend.mdc` — implementation guidance for agents
+4. Application code
+
+**On conflict:** FRS wins over Assessment. See **Assessment deviations** in `02-domain.mdc` for known Assessment errors (do not implement those items).
+
+## Solution Projects (MANDATORY STRUCTURE)
+- `ClaimsModule.Domain` — entities, value objects, domain events, enumerations. ZERO external dependencies.
+- `ClaimsModule.Application` — MediatR commands/queries, FluentValidation validators, DTOs, interfaces, AutoMapper profiles
+- `ClaimsModule.Infrastructure` — Azure Blob, Hangfire job implementations, external services
+- `ClaimsModule.Persistence` — EF Core DbContext, migrations, repositories, Unit of Work
+- `ClaimsModule.API` — ASP.NET Core controllers, middleware, Swagger, startup
+- `claims-module-ui/` — Angular 18 project
+
+## Required Tech Stack
+| Layer | Package |
+|---|---|
+| CQRS | MediatR 12+ |
+| ORM | Entity Framework Core 9 |
+| Validation | FluentValidation — wired at MediatR PIPELINE level, NOT at controller |
+| Mapping | AutoMapper — profiles in Application layer ONLY, never in API |
+| Background Jobs | Hangfire |
+| Database | SQL Server 2022 / Azure SQL |
+| File Storage | Azure Blob Storage via IStorageService interface |
+| Frontend UI | Angular Material |
+| Forms | Reactive Forms only |
+
+## CQRS Rules (Reviewers specifically check this)
+- Every state-changing operation = `Command` (e.g. `CreateClaimCommand`, `ApproveReserveCommand`)
+- Every read = `Query` (e.g. `GetClaimDetailQuery`, `ListClaimsQuery`)
+- Commands and Queries dispatched via `_mediator.Send()`
+- Domain Events raised for: `ClaimCreatedEvent`, `ClaimStatusChangedEvent`, `ReserveApprovedEvent`, `ReserveRejectedEvent`, `DocumentUploadedEvent`
+- FluentValidation registered as `IPipelineBehavior<TRequest, TResponse>` in MediatR pipeline
+
+## Clean Architecture Rules
+- Domain has NO dependencies on any other layer
+- Application depends ONLY on Domain
+- Infrastructure implements Application interfaces
+- Persistence implements Application data-access abstractions via `IClaimsDbContext` + `UnitOfWork` (dedicated `IRepository<T>` interfaces are optional, not required)
+- API sends MediatR commands/queries — no business logic in controllers
+- AutoMapper profiles NEVER in API layer — always in Application
+- Unit of Work wraps multi-table writes in ONE transaction
+
+## Key Interfaces
+- `IStorageService` → `AzureBlobStorageService` + `LocalFileSystemStorageService`
+- `IAuditLogService` → all audit writes go through this; no direct DbContext writes from handlers
+- `ICurrentUserService` → provides current UserId and Role to handlers
+- Storage provider configured via `appsettings.json`: `StorageProvider: AzureBlob | LocalFileSystem`
+
+## Error Responses (ALL validation errors use this structure)
+```json
+{
+  "type": "ValidationError",
+  "title": "One or more validation errors occurred.",
+  "status": 422,
+  "errors": { "FieldName": ["Error message."] }
+}
+```
+
+## Azure Deployment (Required)
+- Backend: Azure App Service **or** Azure Container Apps (Assessment §2.3)
+- Frontend: Azure Static Web App or App Service
+- Azure SQL Database + Azure Blob Storage account
+- Azure Key Vault (optional but valued by reviewers)
+- CI/CD: GitHub Actions or Azure DevOps — must build + migrate + deploy both
+
+## Deliverables (all required for submission)
+- Git repo with full backend + frontend
+- EF Core migration files + seed scripts
+- `docker-compose.yml` (valued)
+- GitHub Actions YAML
+- `README.md`, `ARCHITECTURE.md`, `AI-WORKFLOW.md`
+- Deployed Swagger URL + deployed frontend URL
+- Test credentials: handler role + supervisor role

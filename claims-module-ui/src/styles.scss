@@ -1,0 +1,61 @@
+@use '@angular/material' as mat;
+
+@include mat.core();
+
+$claims-primary: mat.m2-define-palette(mat.$m2-teal-palette, 700);
+$claims-accent: mat.m2-define-palette(mat.$m2-blue-palette, A200);
+$claims-theme: mat.m2-define-light-theme(
+  (
+    color: (
+      primary: $claims-primary,
+      accent: $claims-accent,
+    ),
+  )
+);
+
+@include mat.all-component-themes($claims-theme);
+
+html {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Roboto, 'Helvetica Neue', sans-serif;
+  background: #f5f7fa;
+}
+
+.app-content {
+  min-width: 1280px;
+}
+
+.snack-success {
+  --mdc-snackbar-container-color: #2e7d32;
+  --mdc-snackbar-supporting-text-color: #fff;
+}
+
+.snack-error {
+  --mdc-snackbar-container-color: #c62828;
+  --mdc-snackbar-supporting-text-color: #fff;
+}
+
+.snack-warning {
+  --mdc-snackbar-container-color: #f57c00;
+  --mdc-snackbar-supporting-text-color: #fff;
+}
+
+// Multiline fields (loss description, notes, closure reason): prevent layout break from drag-resize
+textarea[matInput],
+textarea.mat-mdc-input-element {
+  resize: vertical;
+  max-height: 12rem;
+  min-height: 5.5rem;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}

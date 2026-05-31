@@ -1,0 +1,129 @@
+<div class="page">
+  <div class="page-header">
+    <h1>Claims</h1>
+    <a mat-flat-button color="primary" routerLink="/claims/new">Log New Claim</a>
+  </div>
+
+  <mat-card class="filters-card">
+    <form [formGroup]="filterForm" class="filters" (ngSubmit)="applyFilters()">
+      <mat-form-field appearance="outline">
+        <mat-label>Status</mat-label>
+        <mat-select formControlName="statuses" multiple>
+          @for (status of statusOptions; track status) {
+            <mat-option [value]="status">{{ status }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Loss date from</mat-label>
+        <input matInput [matDatepicker]="fromPicker" formControlName="dateFrom" />
+        <mat-datepicker-toggle matIconSuffix [for]="fromPicker"></mat-datepicker-toggle>
+        <mat-datepicker #fromPicker></mat-datepicker>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Loss date to</mat-label>
+        <input matInput [matDatepicker]="toPicker" formControlName="dateTo" />
+        <mat-datepicker-toggle matIconSuffix [for]="toPicker"></mat-datepicker-toggle>
+        <mat-datepicker #toPicker></mat-datepicker>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Assigned handler</mat-label>
+        <input
+          matInput
+          formControlName="assignedHandlerSearch"
+          placeholder="Search handler name"
+        />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Cause of loss</mat-label>
+        <mat-select formControlName="causeOfLossCode">
+          <mat-option value="">All</mat-option>
+          @for (code of causeCodes; track code.code) {
+            <mat-option [value]="code.code">{{ code.name }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Search</mat-label>
+        <input matInput formControlName="search" placeholder="Client or policy number" />
+      </mat-form-field>
+
+      <div class="filter-actions">
+        <button mat-stroked-button type="button" (click)="clearFilters()">Clear</button>
+        <button mat-flat-button color="primary" type="submit">Apply</button>
+      </div>
+    </form>
+  </mat-card>
+
+  @if (loading) {
+    <div class="loading"><mat-spinner diameter="48"></mat-spinner></div>
+  } @else if (claims.length === 0) {
+    <mat-card class="empty-state">
+      <p>No claims match your filters.</p>
+      <a mat-button color="primary" routerLink="/claims/new">Log your first claim</a>
+    </mat-card>
+  } @else {
+    <div class="table-wrap">
+      <table mat-table [dataSource]="claims" class="claims-table">
+        <ng-container matColumnDef="claimNumber">
+          <th mat-header-cell *matHeaderCellDef>Claim #</th>
+          <td mat-cell *matCellDef="let row">{{ row.claimNumber }}</td>
+        </ng-container>
+        <ng-container matColumnDef="policyNumber">
+          <th mat-header-cell *matHeaderCellDef>Policy #</th>
+          <td mat-cell *matCellDef="let row">{{ row.policyNumber || '—' }}</td>
+        </ng-container>
+        <ng-container matColumnDef="clientName">
+          <th mat-header-cell *matHeaderCellDef>Client</th>
+          <td mat-cell *matCellDef="let row">{{ row.clientName || '—' }}</td>
+        </ng-container>
+        <ng-container matColumnDef="lossDate">
+          <th mat-header-cell *matHeaderCellDef>Loss Date</th>
+          <td mat-cell *matCellDef="let row">
+            {{ row.lossDate ? (row.lossDate | date: 'mediumDate') : '—' }}
+          </td>
+        </ng-container>
+        <ng-container matColumnDef="causeOfLoss">
+          <th mat-header-cell *matHeaderCellDef>Cause</th>
+          <td mat-cell *matCellDef="let row">
+            {{ row.causeOfLossName || row.causeOfLossCode || '—' }}
+          </td>
+        </ng-container>
+        <ng-container matColumnDef="status">
+          <th mat-header-cell *matHeaderCellDef>Status</th>
+          <td mat-cell *matCellDef="let row">
+            <app-status-chip [status]="row.status"></app-status-chip>
+          </td>
+        </ng-container>
+        <ng-container matColumnDef="totalReserves">
+          <th mat-header-cell *matHeaderCellDef>Total Reserve</th>
+          <td mat-cell *matCellDef="let row">{{ row.totalReserves | currency }}</td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+        <tr
+          mat-row
+          *matRowDef="let row; columns: displayedColumns"
+          class="clickable-row"
+          (click)="openClaim(row)"
+        ></tr>
+      </table>
+    </div>
+
+    <mat-paginator
+      [length]="totalCount"
+      [pageSize]="pageSize"
+      [pageIndex]="pageIndex"
+      [pageSizeOptions]="[10, 20, 50]"
+      (page)="onPage($event)"
+      showFirstLastButtons
+    >
+    </mat-paginator>
+    <p class="count-label">{{ totalCount }} claim(s) total</p>
+  }
+</div>
