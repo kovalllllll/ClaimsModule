@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, master, develop]
   workflow_dispatch:
+    inputs:
+      deploy_to_azure:
+        description: Deploy API + UI to Azure after build (requires repository secrets)
+        type: boolean
+        default: false
 
 env:
   DOTNET_VERSION: '9.0.x'
@@ -104,10 +109,31 @@ jobs:
   deploy:
     needs: [backend, database, frontend]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.event.inputs.deploy_to_azure == 'true'
+      && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     environment: production
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate Azure deployment secrets
+        env:
+          AZURE_SQL_CONNECTION_STRING: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
+          AZURE_API_APP_NAME: ${{ secrets.AZURE_API_APP_NAME }}
+          AZURE_API_PUBLISH_PROFILE: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
+          AZURE_SWA_TOKEN: ${{ secrets.AZURE_SWA_TOKEN }}
+          AZURE_API_URL: ${{ secrets.AZURE_API_URL }}
+        run: |
+          missing=0
+          for name in AZURE_SQL_CONNECTION_STRING AZURE_API_APP_NAME AZURE_API_PUBLISH_PROFILE AZURE_SWA_TOKEN AZURE_API_URL; do
+            eval "value=\$$name"
+            if [ -z "$value" ]; then
+              echo "::error::Repository secret $name is not set (required for deploy)."
+              missing=1
+            fi
+          done
+          exit $missing
 
       - name: Download API artifact
         uses: actions/download-artifact@v4
@@ -127,15 +153,15 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Apply EF migrations (Azure SQL)
-        if: ${{ secrets.AZURE_SQL_CONNECTION_STRING != '' }}
+        env:
+          AZURE_SQL_CONNECTION_STRING: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
           dotnet ef database update \
             --project src/ClaimsModule.Persistence/ClaimsModule.Persistence.csproj \
             --startup-project src/ClaimsModule.API/ClaimsModule.API.csproj \
-            --connection "${{ secrets.AZURE_SQL_CONNECTION_STRING }}"
+            --connection "$AZURE_SQL_CONNECTION_STRING"
 
       - name: Deploy API to Azure App Service
-        if: ${{ secrets.AZURE_API_PUBLISH_PROFILE != '' }}
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ secrets.AZURE_API_APP_NAME }}
@@ -143,7 +169,6 @@ jobs:
           package: ./publish/api
 
       - name: Deploy UI to Azure Static Web Apps
-        if: ${{ secrets.AZURE_SWA_TOKEN != '' }}
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_TOKEN }}
@@ -152,5 +177,6 @@ jobs:
           skip_app_build: true
 
       - name: Post-deploy smoke (Swagger)
-        if: ${{ secrets.AZURE_API_URL != '' }}
-        run: curl -sf "${{ secrets.AZURE_API_URL }}/swagger/index.html" -o /dev/null
+        env:
+          AZURE_API_URL: ${{ secrets.AZURE_API_URL }}
+        run: curl -sf "${AZURE_API_URL}/swagger/index.html" -o /dev/null
