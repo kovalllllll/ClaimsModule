@@ -27,6 +27,9 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Install EF Core CLI
+        run: dotnet tool restore
+
       - name: Restore
         run: dotnet restore ClaimsModule.sln
 
@@ -74,6 +77,12 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install EF Core CLI
+        run: dotnet tool restore
+
+      - name: Restore solution
+        run: dotnet restore ClaimsModule.sln
 
       - name: Apply migrations on fresh SQL Server
         run: |
@@ -151,6 +160,12 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install EF Core CLI
+        run: dotnet tool restore
+
+      - name: Restore solution
+        run: dotnet restore ClaimsModule.sln
 
       - name: Apply EF migrations (Azure SQL)
         env:
