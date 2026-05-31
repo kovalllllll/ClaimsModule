@@ -1,6 +1,7 @@
 using ClaimsModule.Application.Abstractions.Persistence;
 using ClaimsModule.Domain.Enums;
 using ClaimsModule.Domain.Reserves;
+using ClaimsModule.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 
 namespace ClaimsModule.Persistence.Repositories;
@@ -106,8 +107,11 @@ public sealed class ReserveRepository(ClaimsDbContext db) : IReserveRepository
     public Task<bool> IsPostedForIdempotencyKeyAsync(
         string idempotencyKey,
         CancellationToken cancellationToken = default)
-        => db.ReserveHistory.AnyAsync(
-            h => h.IdempotencyKey.Value == idempotencyKey
+    {
+        var parsed = IdempotencyKey.Parse(idempotencyKey);
+        return db.ReserveHistory.AnyAsync(
+            h => h.IdempotencyKey == parsed
                  && h.PostingStatus == ReservePostingStatus.Posted,
             cancellationToken);
+    }
 }
