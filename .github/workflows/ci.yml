@@ -131,11 +131,12 @@ jobs:
           AZURE_SQL_CONNECTION_STRING: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
           AZURE_API_APP_NAME: ${{ secrets.AZURE_API_APP_NAME }}
           AZURE_API_PUBLISH_PROFILE: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
-          AZURE_SWA_TOKEN: ${{ secrets.AZURE_SWA_TOKEN }}
+          AZURE_UI_APP_NAME: ${{ secrets.AZURE_UI_APP_NAME }}
+          AZURE_UI_PUBLISH_PROFILE: ${{ secrets.AZURE_UI_PUBLISH_PROFILE }}
           AZURE_API_URL: ${{ secrets.AZURE_API_URL }}
         run: |
           missing=0
-          for name in AZURE_SQL_CONNECTION_STRING AZURE_API_APP_NAME AZURE_API_PUBLISH_PROFILE AZURE_SWA_TOKEN AZURE_API_URL; do
+          for name in AZURE_SQL_CONNECTION_STRING AZURE_API_APP_NAME AZURE_API_PUBLISH_PROFILE AZURE_UI_APP_NAME AZURE_UI_PUBLISH_PROFILE AZURE_API_URL; do
             eval "value=\$$name"
             if [ -z "$value" ]; then
               echo "::error::Repository secret $name is not set (required for deploy)."
@@ -183,13 +184,12 @@ jobs:
           publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
           package: ./publish/api
 
-      - name: Deploy UI to Azure Static Web Apps
-        uses: Azure/static-web-apps-deploy@v1
+      - name: Deploy UI to Azure App Service
+        uses: azure/webapps-deploy@v3
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_TOKEN }}
-          action: upload
-          app_location: ./publish/ui
-          skip_app_build: true
+          app-name: ${{ secrets.AZURE_UI_APP_NAME }}
+          publish-profile: ${{ secrets.AZURE_UI_PUBLISH_PROFILE }}
+          package: ./publish/ui
 
       - name: Post-deploy smoke (Swagger)
         env:
